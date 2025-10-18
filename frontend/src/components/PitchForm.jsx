@@ -2,30 +2,17 @@ import { useState } from "react"
 import { supabase } from "../lib/supabaseClient"
 
 export default function PitchForm({ user }) {
+  const [prompt, setPrompt] = useState("")
+  const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null) // raw text result from Gemini
-  const [inputs, setInputs] = useState({
-    title: "",
-    description: "",
-    industry: "",
-    tone: "fun",
-    language: "English",
-  })
 
-  async function handleSubmit(e) {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     setLoading(true)
     setResult(null)
 
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY
-      if (!apiKey) {
-        setResult("❌ Gemini API key not found. Please check your .env file.")
-        setLoading(false)
-        return
-      }
-
-      // Gemini request (use your currently working model name)
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
         {
@@ -37,26 +24,13 @@ export default function PitchForm({ user }) {
                 parts: [
                   {
                     text: `
-You are an AI startup pitch creator.
-Generate a startup pitch ONLY in valid JSON format like this:
-{
-  "name": "",
-  "tagline": "",
-  "elevator_pitch": "",
-  "problem": "",
-  "solution": "",
-  "target_audience": {},
-  "landing_copy": {},
-  "colors": {},
-  "logo_ideas": []
-}
-Tone: ${inputs.tone}
-Language: ${inputs.language}
-Idea Title: ${inputs.title}
-Description: ${inputs.description}
-Industry: ${inputs.industry}
-Return ONLY JSON — no explanation or extra text.
-`,
+You are a creative startup pitch generator AI.
+User provides one paragraph describing their startup idea.
+Return ONLY JSON with:
+name, tagline, elevator_pitch, problem, solution, target_audience, landing_copy, colors, logo_ideas.
+
+User Input: """${prompt}"""
+                    `,
                   },
                 ],
               },
@@ -66,210 +40,182 @@ Return ONLY JSON — no explanation or extra text.
       )
 
       const data = await res.json()
-      console.log("Gemini API Raw Response:", data)
+      console.log("Gemini Response:", data)
 
-      // extract text safely (handles different response shapes)
-      let output =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        data?.candidates?.[0]?.content?.text ||
-        JSON.stringify(data, null, 2)
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || ""
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (!jsonMatch) throw new Error("Invalid JSON format.")
 
-      const pitchText = output.trim()
-      setResult(pitchText)
+      const parsed = JSON.parse(jsonMatch[0])
+      setResult(parsed)
 
-      // Try to extract first JSON object in the text (in case model added extra words)
-      const jsonMatch = pitchText.match(/\{[\s\S]*\}/)
-      if (!jsonMatch) {
-        console.error("⚠️ JSON block not found in Gemini output.")
-        return
-      }
-
-      const onlyJson = jsonMatch[0]
-      let parsedData
-      try {
-        parsedData = JSON.parse(onlyJson)
-      } catch (err) {
-        console.error("⚠️ Still invalid JSON after cleanup:", err)
-        return
-      }
-
-      // Save to Supabase (table: pitches). Adjust column names if your schema differs.
+      // ✅ Save to Supabase
       const { error } = await supabase.from("pitches").insert({
         user_id: user.id,
-        title: inputs.title,
-        short_description: inputs.description,
-        industry: inputs.industry,
-        tone: inputs.tone,
-        language: inputs.language,
-        generated_data: parsedData,
+        title: parsed.name || "Untitled",
+        short_description: parsed.tagline || "",
+        industry: parsed.industry || "N/A",
+        tone: "auto",
+        language: "auto",
+        generated_data: parsed,
       })
+      if (error) throw error
 
-      if (error) {
-        console.error("❌ Supabase Insert Error:", error)
-        alert("Supabase Error: " + error.message)
-      } else {
-        console.log("✅ Pitch successfully saved in Supabase!")
-        alert("✅ Pitch saved successfully in Supabase!")
-      }
+      // Success notification
+      const notification = document.createElement("div")
+      notification.className = "fixed top-4 right-4 bg-green-500 text-white px-6 py-3 rounded-xl shadow-lg z-50"
+      notification.innerHTML = "✅ Pitch saved successfully!"
+      document.body.appendChild(notification)
+      setTimeout(() => notification.remove(), 3000)
+
     } catch (err) {
-      console.error("Error generating pitch:", err)
-      setResult("❌ Error generating pitch. Check console for details.")
+      console.error("Error:", err)
+      const errorNotification = document.createElement("div")
+      errorNotification.className = "fixed top-4 right-4 bg-red-500 text-white px-6 py-3 rounded-xl shadow-lg z-50"
+      errorNotification.innerHTML = "❌ " + err.message
+      document.body.appendChild(errorNotification)
+      setTimeout(() => errorNotification.remove(), 3000)
     } finally {
       setLoading(false)
     }
   }
 
-  // Helper to render parsed JSON in nice UI
-  function renderPretty(resultText) {
-    try {
-      const data = JSON.parse(resultText.match(/\{[\s\S]*\}/)[0])
+  return (
+    <div className="max-w-4xl mx-auto">
+      {/* Header */}
+      <div className="text-center mb-12">
+        <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl shadow-lg mb-6">
+          <span className="text-2xl">🚀</span>
+        </div>
+        <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600 mb-4">
+          PitchCraft AI
+        </h1>
+        <p className="text-xl text-gray-600 max-w-2xl mx-auto">
+          Transform your startup idea into a compelling pitch deck with AI-powered insights and professional branding.
+        </p>
+      </div>
 
-      return (
-        <div className="space-y-4 text-gray-800">
+      {/* Form Section */}
+      <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-2xl border border-white/40 p-8 mb-8">
+        <form onSubmit={handleSubmit} className="space-y-6">
           <div>
-            <h2 className="text-2xl font-bold text-blue-600">{data.name}</h2>
-            {data.tagline && <p className="italic text-gray-600">{data.tagline}</p>}
-            {data.elevator_pitch && <p className="mt-2">{data.elevator_pitch}</p>}
+            <label className="block text-sm font-semibold text-gray-700 mb-3">
+              Describe Your Startup Idea
+            </label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="e.g. I want to build an AI-powered health tracker that motivates users to stay fit with gamified rewards, personalized coaching, and social challenges for millennials and Gen Z..."
+              className="w-full h-48 rounded-2xl p-6 text-gray-800 border-2 border-gray-200 focus:border-blue-500 focus:ring-4 focus:ring-blue-200 outline-none resize-none shadow-sm transition-all duration-200 bg-white/50 backdrop-blur-sm"
+              required
+            ></textarea>
           </div>
 
-          {data.problem && (
-            <div>
-              <h4 className="font-semibold text-gray-700">🧩 Problem</h4>
-              <p>{data.problem}</p>
-            </div>
-          )}
+          <button
+            type="submit"
+            disabled={loading}
+            className={`w-full py-4 rounded-2xl font-bold text-white shadow-lg transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98] ${
+              loading
+                ? "bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed"
+                : "bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 shadow-blue-500/25"
+            }`}
+          >
+            {loading ? (
+              <div className="flex items-center justify-center space-x-3">
+                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>Generating Your Pitch...</span>
+              </div>
+            ) : (
+              <div className="flex items-center justify-center space-x-2">
+                <span>✨</span>
+                <span>Generate Professional Pitch</span>
+              </div>
+            )}
+          </button>
+        </form>
+      </div>
 
-          {data.solution && (
-            <div>
-              <h4 className="font-semibold text-gray-700">💡 Solution</h4>
-              <p>{data.solution}</p>
+      {/* Results Section */}
+      {result && (
+        <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-2xl border border-white/40 p-8">
+          <div className="flex items-center space-x-3 mb-6">
+            <div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center">
+              <span className="text-white text-lg">🎯</span>
             </div>
-          )}
+            <h2 className="text-2xl font-bold text-gray-800">Your AI-Generated Pitch</h2>
+          </div>
 
-          {data.target_audience && (
-            <div>
-              <h4 className="font-semibold text-gray-700">🎯 Target Audience</h4>
-              {data.target_audience.description && <p>{data.target_audience.description}</p>}
-              {Array.isArray(data.target_audience.segments) && (
-                <ul className="list-disc ml-6 text-sm mt-1">
-                  {data.target_audience.segments.map((s, i) => (
-                    <li key={i}>{s}</li>
-                  ))}
-                </ul>
-              )}
+          {/* Main Pitch Info */}
+          <div className="space-y-6">
+            <div className="text-center mb-8">
+              <h3 className="text-3xl font-bold text-gray-900 mb-2">{result.name}</h3>
+              <p className="text-xl text-gray-600 italic">{result.tagline}</p>
             </div>
-          )}
 
-          {data.colors && Object.keys(data.colors).length > 0 && (
-            <div>
-              <h4 className="font-semibold text-gray-700">🎨 Colors</h4>
-              <div className="flex gap-2 mt-2">
-                {Object.entries(data.colors).map(([name, hex]) => (
-                  <div key={name} className="flex items-center gap-2">
-                    <div
-                      className="w-8 h-8 rounded-full border"
-                      style={{ backgroundColor: hex }}
-                      title={`${name}: ${hex}`}
-                    />
-                    <div className="text-sm text-gray-600">{name}</div>
-                  </div>
-                ))}
+            <div className="bg-blue-50/50 rounded-2xl p-6 border border-blue-100">
+              <h4 className="font-semibold text-blue-900 mb-3 text-lg">Elevator Pitch</h4>
+              <p className="text-gray-700 leading-relaxed">{result.elevator_pitch}</p>
+            </div>
+
+            {/* Problem & Solution Grid */}
+            <div className="grid md:grid-cols-2 gap-6">
+              <div className="bg-red-50/50 rounded-2xl p-6 border border-red-100">
+                <div className="flex items-center space-x-2 mb-3">
+                  <span className="text-red-600 text-lg">🧩</span>
+                  <h4 className="font-semibold text-red-900">The Problem</h4>
+                </div>
+                <p className="text-gray-700 leading-relaxed">{result.problem}</p>
+              </div>
+
+              <div className="bg-green-50/50 rounded-2xl p-6 border border-green-100">
+                <div className="flex items-center space-x-2 mb-3">
+                  <span className="text-green-600 text-lg">💡</span>
+                  <h4 className="font-semibold text-green-900">Our Solution</h4>
+                </div>
+                <p className="text-gray-700 leading-relaxed">{result.solution}</p>
               </div>
             </div>
-          )}
 
-          {Array.isArray(data.logo_ideas) && data.logo_ideas.length > 0 && (
-            <div>
-              <h4 className="font-semibold text-gray-700">🚀 Logo Ideas</h4>
-              <ul className="list-disc ml-6 text-sm">
-                {data.logo_ideas.map((l, i) => (
-                  <li key={i}>{l}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+            {/* Branding Elements */}
+            {result.colors && (
+              <div className="bg-purple-50/50 rounded-2xl p-6 border border-purple-100">
+                <div className="flex items-center space-x-2 mb-4">
+                  <span className="text-purple-600 text-lg">🎨</span>
+                  <h4 className="font-semibold text-purple-900">Brand Color Palette</h4>
+                </div>
+                <div className="flex gap-4 flex-wrap">
+                  {Object.entries(result.colors).map(([key, val]) => (
+                    <div key={key} className="text-center">
+                      <div
+                        className="w-16 h-16 rounded-2xl border-2 border-white shadow-lg mb-2"
+                        style={{ backgroundColor: val }}
+                      ></div>
+                      <p className="text-xs font-medium text-gray-700 capitalize">{key}</p>
+                      <p className="text-xs text-gray-500">{val}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          {data.landing_copy && (
-            <div className="mt-4 p-3 bg-blue-50 rounded border-l-4 border-blue-400">
-              {data.landing_copy.headline && <p className="font-semibold">{data.landing_copy.headline}</p>}
-              {data.landing_copy.subheadline && <p>{data.landing_copy.subheadline}</p>}
-              {data.landing_copy.call_to_action && <p className="text-blue-600 mt-2">{data.landing_copy.call_to_action}</p>}
-            </div>
-          )}
-        </div>
-      )
-    } catch (err) {
-      // Fallback: show raw text
-      return (
-        <pre className="text-sm whitespace-pre-wrap text-gray-700 bg-gray-100 p-2 rounded">
-          {resultText}
-        </pre>
-      )
-    }
-  }
-
-  return (
-    <div className="p-8 max-w-2xl mx-auto">
-      <h2 className="text-2xl font-bold mb-4 text-blue-700">Generate Your Startup Pitch</h2>
-
-      <form onSubmit={handleSubmit} className="space-y-3">
-        <input
-          type="text"
-          placeholder="Startup Title"
-          value={inputs.title}
-          onChange={(e) => setInputs({ ...inputs, title: e.target.value })}
-          className="border p-2 w-full rounded"
-          required
-        />
-
-        <textarea
-          placeholder="Short Description"
-          value={inputs.description}
-          onChange={(e) => setInputs({ ...inputs, description: e.target.value })}
-          className="border p-2 w-full rounded"
-          required
-        ></textarea>
-
-        <input
-          type="text"
-          placeholder="Industry (e.g. FinTech, HealthTech)"
-          value={inputs.industry}
-          onChange={(e) => setInputs({ ...inputs, industry: e.target.value })}
-          className="border p-2 w-full rounded"
-        />
-
-        <div className="flex gap-3">
-          <select
-            value={inputs.tone}
-            onChange={(e) => setInputs({ ...inputs, tone: e.target.value })}
-            className="border p-2 w-1/2 rounded"
-          >
-            <option value="fun">Fun</option>
-            <option value="formal">Formal</option>
-          </select>
-
-          <select
-            value={inputs.language}
-            onChange={(e) => setInputs({ ...inputs, language: e.target.value })}
-            className="border p-2 w-1/2 rounded"
-          >
-            <option value="English">English</option>
-            <option value="Roman Urdu">Roman Urdu</option>
-          </select>
-        </div>
-
-        <button
-          disabled={loading}
-          className="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700 transition w-full"
-        >
-          {loading ? "Generating..." : "Generate Pitch"}
-        </button>
-      </form>
-
-      {result && (
-        <div className="bg-white mt-6 p-6 rounded-2xl shadow border">
-          <h3 className="text-xl font-bold mb-4">🎨 Your AI Generated Startup Pitch</h3>
-          {renderPretty(result)}
+            {/* Logo Ideas */}
+            {result.logo_ideas && (
+              <div className="bg-orange-50/50 rounded-2xl p-6 border border-orange-100">
+                <div className="flex items-center space-x-2 mb-4">
+                  <span className="text-orange-600 text-lg">🔥</span>
+                  <h4 className="font-semibold text-orange-900">Logo Concepts</h4>
+                </div>
+                <div className="grid gap-3">
+                  {result.logo_ideas.map((idea, i) => (
+                    <div key={i} className="flex items-center space-x-3 bg-white/50 rounded-xl p-4 border border-orange-100">
+                      <span className="text-orange-500">•</span>
+                      <p className="text-gray-700">{idea}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
