@@ -1,63 +1,92 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { supabase } from "../lib/supabaseClient"
+import { motion, AnimatePresence } from "framer-motion"
 
 export default function PitchForm({ user }) {
   const [prompt, setPrompt] = useState("")
   const [result, setResult] = useState(null)
   const [landingCode, setLandingCode] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [activeTab, setActiveTab] = useState("pitch") // "pitch" or "website"
+  const [activeTab, setActiveTab] = useState("pitch")
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState("")
+
+  // Generate preview URL when landing code changes
+  useEffect(() => {
+    if (landingCode && !previewUrl) {
+      generatePreview()
+    }
+  }, [landingCode])
+
+  const generatePreview = () => {
+    if (!landingCode) return
+    
+    // Create blob from HTML code
+    const blob = new Blob([landingCode], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    setPreviewUrl(url)
+  }
+
+  const openPreview = () => {
+    if (!previewUrl) {
+      generatePreview()
+    }
+    setShowPreview(true)
+  }
+
+  const closePreview = () => {
+    setShowPreview(false)
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
     setLoading(true)
     setResult(null)
     setLandingCode(null)
+    setPreviewUrl("")
+    setShowPreview(false)
 
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY
       if (!apiKey) throw new Error("Gemini API key missing in .env")
 
-      // Enhanced prompt - landing page code bhi mang rahe hain
+      // Step 1: Get Pitch Data
       const requestBody = {
         contents: [
           {
             parts: [
               {
                 text: `
-You are an advanced startup ideation AI. The user will provide a short paragraph describing a startup idea.
-From that, generate a single VALID JSON object (no commentary, no extra text) with EXACT keys:
+ACT AS A PROFESSIONAL STARTUP CONSULTANT. Generate a comprehensive startup pitch package from this idea: "${prompt}"
 
+Return ONLY valid JSON with this exact structure:
 {
-  "name": "Startup name",
-  "tagline": "Short catchy tagline",
-  "elevator_pitch": "3-5 sentence compelling pitch",
-  "problem": "What problem this solves",
-  "solution": "How it solves it",
+  "name": "Creative startup name",
+  "tagline": "Catchy one-liner",
+  "elevator_pitch": "2-4 sentence compelling story",
+  "problem": "Clear problem statement",
+  "solution": "Innovative solution description", 
   "target_audience": {
-    "description": "Short description of main audience",
-    "segments": ["segment 1", "segment 2"]
+    "description": "Primary customer description",
+    "segments": ["segment 1", "segment 2", "segment 3"]
   },
-  "unique_value_proposition": "1-2 sentence UVP (why unique)",
+  "unique_value_proposition": "What makes it unique vs competitors",
   "landing_copy": {
-    "headline": "Hero headline for website",
-    "subheadline": "Supporting subheadline",
-    "call_to_action": "Short CTA text"
+    "headline": "Attention-grabbing headline",
+    "subheadline": "Supporting description",
+    "call_to_action": "Action-oriented CTA"
   },
-  "industry": "Optional industry name",
+  "industry": "Relevant industry",
   "colors": {
     "primary": "#hex",
-    "secondary": "#hex",
+    "secondary": "#hex", 
     "accent": "#hex",
     "neutral": "#hex"
   },
-  "logo_ideas": ["idea 1", "idea 2"]
+  "logo_ideas": ["creative idea 1", "creative idea 2", "creative idea 3"]
 }
 
-User Input: """${prompt}"""
-
-Return ONLY valid JSON (single object). If you must add anything else, do NOT — return strictly the JSON object.
-                `,
+IMPORTANT: Return ONLY the JSON object, no other text.`
               },
             ],
           },
@@ -80,139 +109,99 @@ Return ONLY valid JSON (single object). If you must add anything else, do NOT �
 
       // Extract JSON
       const jsonMatch = text.match(/\{[\s\S]*\}/)
-      if (!jsonMatch) {
-        throw new Error("Could not find JSON object in AI response.")
-      }
+      if (!jsonMatch) throw new Error("Could not find JSON object in AI response.")
 
       const cleaned = jsonMatch[0]
       let parsed
       try {
         parsed = JSON.parse(cleaned)
       } catch (err) {
-        // Attempt light fixes
         const attempt = cleaned
           .replace(/'\s*:\s*'/g, '": "')
           .replace(/([{\[,])\s*'([^']+?)'\s*(?=[:,\]}])/g, '$1"$2"')
           .replace(/,(\s*[}\]])/g, "$1")
-        try {
-          parsed = JSON.parse(attempt)
-        } catch (err2) {
-          throw new Error("AI returned invalid JSON (parsing failed).")
-        }
+        parsed = JSON.parse(attempt)
       }
 
-      // Ensure basic keys exist
+      // Ensure basic structure
       parsed.name = parsed.name || "Untitled Startup"
-      parsed.tagline = parsed.tagline || ""
-      parsed.industry = parsed.industry || ""
+      parsed.tagline = parsed.tagline || "Transforming ideas into reality"
+      parsed.industry = parsed.industry || "Technology"
 
       setResult(parsed)
 
-      // ✅ AB LANDING PAGE CODE GENERATE KARENGE
-      await generateLandingPageCode(parsed)
+      // Generate landing page code
+      const generatedCode = await generateLandingPageCode(parsed)
+      setLandingCode(generatedCode)
 
       // Save to Supabase
       const { error } = await supabase.from("pitches").insert({
         user_id: user.id,
         title: parsed.name,
-        short_description: parsed.tagline || parsed.elevator_pitch || "",
-        industry: parsed.industry || null,
+        short_description: parsed.tagline,
+        industry: parsed.industry,
         tone: "auto",
         language: "auto",
         generated_data: parsed,
-        landing_code: landingCode, // Naya field add karo database mein
+        landing_code: generatedCode,
       })
 
-      if (error) {
-        console.error("Supabase insert error:", error)
-        throw new Error("Failed to save pitch to database: " + error.message)
-      } else {
-        // Success notification
-        const el = document.createElement("div")
-        el.className = "fixed top-4 right-4 bg-green-600 text-white px-5 py-3 rounded-xl shadow-lg z-50"
-        el.innerText = "✅ Pitch + Website Code Generated!"
-        document.body.appendChild(el)
-        setTimeout(() => el.remove(), 3000)
-      }
+      if (error) throw error
+
+      // Success notification
+      showNotification("✅ Pitch + Website Code Generated!", "success")
     } catch (err) {
       console.error(err)
-      const el = document.createElement("div")
-      el.className = "fixed top-4 right-4 bg-red-600 text-white px-5 py-3 rounded-xl shadow-lg z-50"
-      el.innerText = "❌ " + (err.message || "Something went wrong")
-      document.body.appendChild(el)
-      setTimeout(() => el.remove(), 5000)
+      showNotification("❌ " + (err.message || "Something went wrong"), "error")
     } finally {
       setLoading(false)
     }
   }
 
-  // ✅ NAYA FUNCTION: LANDING PAGE CODE GENERATE KARNE KE LIYE
   async function generateLandingPageCode(pitchData) {
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY
       
-      const websitePrompt = `
-Create a complete, professional landing page HTML/CSS/JS code for this startup:
+      const websitePrompt = `Create a stunning, modern landing page HTML for: ${pitchData.name} - ${pitchData.tagline}
 
-STARTUP DETAILS:
-- Name: ${pitchData.name}
-- Tagline: ${pitchData.tagline}
-- Elevator Pitch: ${pitchData.elevator_pitch}
+Details:
 - Problem: ${pitchData.problem}
-- Solution: ${pitchData.solution}
+- Solution: ${pitchData.solution} 
 - UVP: ${pitchData.unique_value_proposition}
 - Colors: ${JSON.stringify(pitchData.colors)}
-- Target Audience: ${pitchData.target_audience?.description}
+- Audience: ${pitchData.target_audience?.description}
 
-REQUIREMENTS:
-1. Create a MODERN, PROFESSIONAL landing page with Tailwind CSS
-2. Include: Hero section, Problem/Solution, Features, Testimonials, CTA, Footer
-3. Use the provided color palette: ${JSON.stringify(pitchData.colors)}
-4. Make it fully responsive
-5. Include interactive elements (hover effects, smooth scroll)
-6. Use professional startup-style copywriting
-7. Add placeholder images with relevant alt text
-8. Include a working contact form
+Requirements:
+- Use Tailwind CSS CDN
+- Modern glass morphism design
+- Fully responsive layout
+- Smooth animations
+- Professional startup aesthetic
+- Include: Hero, Features, Testimonials, CTA, Footer
+- Add interactive elements
 
-OUTPUT FORMAT:
-Return ONLY the complete HTML code with embedded Tailwind CSS and JavaScript. No explanations, no markdown, just pure HTML file that I can copy-paste and use directly.
-
-Generate the complete landing page code now:
-      `
+Return ONLY complete HTML code:`
 
       const resp = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: websitePrompt }] }]
-          }),
+          body: JSON.stringify({ contents: [{ parts: [{ text: websitePrompt }] }] }),
         }
       )
 
       const data = await resp.json()
-      const websiteCode = data?.candidates?.[0]?.content?.parts?.[0]?.text || ""
-      
-      setLandingCode(websiteCode)
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text || generateFallbackTemplate(pitchData)
     } catch (error) {
-      console.error("Website code generation failed:", error)
-      // Fallback basic template
-      setLandingCode(generateFallbackTemplate(pitchData))
+      return generateFallbackTemplate(pitchData)
     }
   }
 
-  // ✅ FALLBACK TEMPLATE AGAR AI FAIL HO JAYE
   function generateFallbackTemplate(pitchData) {
-    const colors = pitchData.colors || {
-      primary: "#3B82F6",
-      secondary: "#8B5CF6", 
-      accent: "#06B6D4",
-      neutral: "#6B7280"
-    }
-
-    return `
-<!DOCTYPE html>
+    const colors = pitchData.colors || { primary: "#3B82F6", secondary: "#8B5CF6", accent: "#06B6D4" }
+    
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -220,24 +209,21 @@ Generate the complete landing page code now:
     <title>${pitchData.name} - ${pitchData.tagline}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .gradient-bg { background: linear-gradient(135deg, ${colors.primary}20, ${colors.secondary}20); }
+        .hero-gradient { background: linear-gradient(135deg, ${colors.primary}, ${colors.secondary}); }
+    </style>
 </head>
 <body class="bg-white">
     <!-- Navigation -->
-    <nav class="bg-white shadow-lg sticky top-0 z-50">
+    <nav class="bg-white/80 backdrop-blur-lg shadow-lg sticky top-0 z-50 border-b border-gray-200">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between items-center h-16">
-                <div class="flex items-center">
+                <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 bg-gradient-to-r from-[${colors.primary}] to-[${colors.secondary}] rounded-lg flex items-center justify-center">
-                        <span class="text-white font-bold text-lg">🚀</span>
+                        <span class="text-white font-bold">🚀</span>
                     </div>
-                    <span class="ml-3 text-xl font-bold text-gray-900">${pitchData.name}</span>
-                </div>
-                <div class="hidden md:block">
-                    <div class="ml-10 flex items-baseline space-x-4">
-                        <a href="#features" class="text-gray-600 hover:text-[${colors.primary}] px-3 py-2 rounded-md text-sm font-medium">Features</a>
-                        <a href="#solution" class="text-gray-600 hover:text-[${colors.primary}] px-3 py-2 rounded-md text-sm font-medium">Solution</a>
-                        <a href="#contact" class="text-gray-600 hover:text-[${colors.primary}] px-3 py-2 rounded-md text-sm font-medium">Contact</a>
-                    </div>
+                    <span class="text-xl font-bold text-gray-900">${pitchData.name}</span>
                 </div>
                 <button class="bg-[${colors.primary}] text-white px-6 py-2 rounded-lg font-semibold hover:bg-[${colors.secondary}] transition-colors">
                     Get Started
@@ -247,58 +233,42 @@ Generate the complete landing page code now:
     </nav>
 
     <!-- Hero Section -->
-    <section class="bg-gradient-to-br from-gray-50 to-white py-20">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="text-center">
-                <h1 class="text-5xl font-bold text-gray-900 mb-6">${pitchData.landing_copy?.headline || pitchData.name}</h1>
-                <p class="text-xl text-gray-600 mb-8 max-w-3xl mx-auto">${pitchData.landing_copy?.subheadline || pitchData.tagline}</p>
-                <div class="flex flex-col sm:flex-row gap-4 justify-center">
-                    <button class="bg-[${colors.primary}] text-white px-8 py-4 rounded-xl font-semibold text-lg hover:bg-[${colors.secondary}] transition-colors shadow-lg">
-                        ${pitchData.landing_copy?.call_to_action || "Get Started Free"}
-                    </button>
-                    <button class="border border-gray-300 text-gray-700 px-8 py-4 rounded-xl font-semibold text-lg hover:bg-gray-50 transition-colors">
-                        Learn More
-                    </button>
-                </div>
+    <section class="hero-gradient text-white py-20">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <h1 class="text-5xl font-bold mb-6">${pitchData.landing_copy?.headline || pitchData.name}</h1>
+            <p class="text-xl opacity-90 mb-8 max-w-3xl mx-auto">${pitchData.landing_copy?.subheadline || pitchData.tagline}</p>
+            <div class="flex flex-col sm:flex-row gap-4 justify-center">
+                <button class="bg-white text-[${colors.primary}] px-8 py-4 rounded-xl font-semibold text-lg hover:bg-gray-100 transition-colors shadow-lg">
+                    ${pitchData.landing_copy?.call_to_action || "Get Started Free"}
+                </button>
+                <button class="border border-white text-white px-8 py-4 rounded-xl font-semibold text-lg hover:bg-white/10 transition-colors">
+                    Learn More
+                </button>
             </div>
         </div>
     </section>
 
     <!-- Problem Section -->
-    <section id="problem" class="py-20 bg-white">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold text-gray-900 mb-4">The Problem We Solve</h2>
-                <p class="text-lg text-gray-600 max-w-2xl mx-auto">${pitchData.problem}</p>
-            </div>
+    <section class="py-20 bg-white">
+        <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <h2 class="text-3xl font-bold text-gray-900 mb-6">The Problem We Solve</h2>
+            <p class="text-lg text-gray-600 leading-relaxed">${pitchData.problem}</p>
         </div>
     </section>
 
     <!-- Solution Section -->
-    <section id="solution" class="py-20 bg-gray-50">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="text-center mb-16">
-                <h2 class="text-3xl font-bold text-gray-900 mb-4">Our Innovative Solution</h2>
-                <p class="text-lg text-gray-600 max-w-2xl mx-auto">${pitchData.solution}</p>
-            </div>
+    <section class="py-20 gradient-bg">
+        <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <h2 class="text-3xl font-bold text-gray-900 mb-6">Our Innovative Solution</h2>
+            <p class="text-lg text-gray-600 leading-relaxed">${pitchData.solution}</p>
         </div>
     </section>
 
-    <!-- UVP Section -->
-    <section class="py-20 bg-white">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="bg-gradient-to-r from-[${colors.primary}] to-[${colors.secondary}] rounded-3xl p-12 text-center text-white">
-                <h2 class="text-3xl font-bold mb-6">Why Choose ${pitchData.name}?</h2>
-                <p class="text-xl opacity-90">${pitchData.unique_value_proposition}</p>
-            </div>
-        </div>
-    </section>
-
-    <!-- Final CTA -->
-    <section class="py-20 bg-gray-900">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-            <h2 class="text-3xl font-bold text-white mb-6">Ready to Get Started?</h2>
-            <p class="text-gray-300 mb-8 text-lg">Join thousands of satisfied users today</p>
+    <!-- CTA Section -->
+    <section class="py-20 bg-gray-900 text-white">
+        <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+            <h2 class="text-3xl font-bold mb-6">Ready to Get Started?</h2>
+            <p class="text-gray-300 mb-8 text-lg">Join the future with ${pitchData.name}</p>
             <button class="bg-[${colors.accent}] text-white px-8 py-4 rounded-xl font-semibold text-lg hover:bg-[${colors.primary}] transition-colors">
                 Start Your Journey
             </button>
@@ -313,166 +283,262 @@ Generate the complete landing page code now:
     </footer>
 
     <script>
-        // Smooth scroll
+        // Smooth scroll for navigation
         document.querySelectorAll('a[href^="#"]').forEach(anchor => {
             anchor.addEventListener('click', function (e) {
                 e.preventDefault();
-                document.querySelector(this.getAttribute('href')).scrollIntoView({
-                    behavior: 'smooth'
-                });
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                }
             });
         });
     </script>
 </body>
-</html>
-    `
+</html>`
   }
 
-  // ✅ RENDER PITCH DETAILS
-  function RenderPitchDetails({ data }) {
+  function showNotification(message, type) {
+    const el = document.createElement("div")
+    el.className = `fixed top-4 right-4 px-6 py-3 rounded-xl shadow-2xl z-50 font-semibold backdrop-blur-sm border ${
+      type === "success" 
+        ? "bg-green-500/90 text-white border-green-400" 
+        : "bg-red-500/90 text-white border-red-400"
+    }`
+    el.innerText = message
+    document.body.appendChild(el)
+    setTimeout(() => {
+      el.style.opacity = "0"
+      el.style.transform = "translateX(100%)"
+      setTimeout(() => el.remove(), 300)
+    }, 3000)
+  }
+
+  // ✅ COMPLETE PITCH DETAILS COMPONENT
+  const RenderPitchDetails = ({ data }) => {
     if (!data) return null
+    
     return (
-      <div className="bg-white/90 backdrop-blur-md rounded-2xl p-6 shadow-lg border border-gray-100">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-2xl font-bold text-gray-900">{data.name}</h2>
-            {data.tagline && <p className="text-gray-600 italic">{data.tagline}</p>}
-            {data.industry && (
-              <p className="text-xs mt-2 text-gray-500">Industry: {data.industry}</p>
-            )}
+      <div className="space-y-6">
+        {/* Startup Header */}
+        <motion.div 
+          className="bg-gradient-to-r from-blue-500 to-purple-600 rounded-3xl p-8 text-white shadow-2xl"
+          initial={{ scale: 0.9 }}
+          animate={{ scale: 1 }}
+        >
+          <h2 className="text-4xl font-black mb-3">{data.name}</h2>
+          <p className="text-xl opacity-90 mb-4">{data.tagline}</p>
+          <div className="flex items-center space-x-4">
+            <span className="bg-white/20 px-3 py-1 rounded-full text-sm backdrop-blur-sm">
+              🏢 {data.industry}
+            </span>
+            <span className="bg-white/20 px-3 py-1 rounded-full text-sm backdrop-blur-sm">
+              🎯 {data.target_audience?.segments?.length || 0} Target Segments
+            </span>
           </div>
-        </div>
+        </motion.div>
 
-        {/* Elevator */}
-        {data.elevator_pitch && (
-          <div className="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100">
-            <h4 className="font-semibold text-blue-800">Elevator Pitch</h4>
-            <p className="mt-2 text-gray-700">{data.elevator_pitch}</p>
-          </div>
-        )}
-
-        {/* Problem / Solution */}
-        <div className="mt-4 grid md:grid-cols-2 gap-4">
-          {data.problem && (
-            <div className="bg-red-50 rounded-xl p-4 border border-red-100">
-              <h5 className="font-semibold text-red-700">🧩 Problem</h5>
-              <p className="mt-2 text-gray-700">{data.problem}</p>
+        {/* Main Content Grid */}
+        <div className="grid lg:grid-cols-2 gap-6">
+          {/* Elevator Pitch */}
+          <motion.div
+            whileHover={{ scale: 1.02, y: -5 }}
+            className="p-6 rounded-2xl backdrop-blur-sm border bg-blue-50/50 border-blue-100 shadow-lg hover:shadow-xl transition-all duration-300"
+          >
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="text-2xl">🎯</div>
+              <h3 className="font-bold text-lg text-gray-800">Elevator Pitch</h3>
             </div>
-          )}
-          {data.solution && (
-            <div className="bg-green-50 rounded-xl p-4 border border-green-100">
-              <h5 className="font-semibold text-green-700">💡 Solution</h5>
-              <p className="mt-2 text-gray-700">{data.solution}</p>
-            </div>
-          )}
-        </div>
+            <p className="text-gray-600 leading-relaxed">{data.elevator_pitch}</p>
+          </motion.div>
 
-        {/* UVP */}
-        {data.unique_value_proposition && (
-          <div className="mt-4 bg-yellow-50 rounded-xl p-4 border border-yellow-100">
-            <h5 className="font-semibold text-yellow-800">💎 Unique Value Proposition</h5>
-            <p className="mt-2 text-gray-700">{data.unique_value_proposition}</p>
-          </div>
-        )}
+          {/* Unique Value Proposition */}
+          <motion.div
+            whileHover={{ scale: 1.02, y: -5 }}
+            className="p-6 rounded-2xl backdrop-blur-sm border bg-purple-50/50 border-purple-100 shadow-lg hover:shadow-xl transition-all duration-300"
+          >
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="text-2xl">💎</div>
+              <h3 className="font-bold text-lg text-gray-800">Unique Value Proposition</h3>
+            </div>
+            <p className="text-gray-600 leading-relaxed">{data.unique_value_proposition}</p>
+          </motion.div>
+
+          {/* Problem */}
+          <motion.div
+            whileHover={{ scale: 1.02, y: -5 }}
+            className="p-6 rounded-2xl backdrop-blur-sm border bg-red-50/50 border-red-100 shadow-lg hover:shadow-xl transition-all duration-300"
+          >
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="text-2xl">🧩</div>
+              <h3 className="font-bold text-lg text-gray-800">The Problem</h3>
+            </div>
+            <p className="text-gray-600 leading-relaxed">{data.problem}</p>
+          </motion.div>
+
+          {/* Solution */}
+          <motion.div
+            whileHover={{ scale: 1.02, y: -5 }}
+            className="p-6 rounded-2xl backdrop-blur-sm border bg-green-50/50 border-green-100 shadow-lg hover:shadow-xl transition-all duration-300"
+          >
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="text-2xl">💡</div>
+              <h3 className="font-bold text-lg text-gray-800">Our Solution</h3>
+            </div>
+            <p className="text-gray-600 leading-relaxed">{data.solution}</p>
+          </motion.div>
+        </div>
 
         {/* Target Audience */}
-        {data.target_audience && (
-          <div className="mt-4 bg-indigo-50 rounded-xl p-4 border border-indigo-100">
-            <h5 className="font-semibold text-indigo-800">🎯 Target Audience</h5>
-            <p className="mt-2 text-gray-700">{data.target_audience.description}</p>
-            {Array.isArray(data.target_audience.segments) && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {data.target_audience.segments.map((s, i) => (
-                  <span
-                    key={i}
-                    className="text-sm bg-indigo-100 text-indigo-800 px-3 py-1 rounded-full"
-                  >
-                    {s}
-                  </span>
-                ))}
-              </div>
-            )}
+        <motion.div
+          className="bg-gradient-to-r from-indigo-50 to-purple-50 rounded-2xl p-6 border border-indigo-100 shadow-lg"
+          whileHover={{ scale: 1.01 }}
+        >
+          <h3 className="text-xl font-bold text-indigo-800 mb-4 flex items-center">
+            <span className="mr-2">🎯</span>
+            Target Audience
+          </h3>
+          <p className="text-gray-700 mb-4">{data.target_audience?.description}</p>
+          <div className="flex flex-wrap gap-2">
+            {data.target_audience?.segments?.map((segment, i) => (
+              <motion.span
+                key={i}
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ delay: i * 0.1 }}
+                className="bg-indigo-500 text-white px-4 py-2 rounded-full text-sm font-medium shadow-lg"
+              >
+                {segment}
+              </motion.span>
+            ))}
           </div>
-        )}
+        </motion.div>
 
-        {/* Landing / hero */}
+        {/* Landing Copy */}
         {data.landing_copy && (
-          <div className="mt-4 bg-gradient-to-r from-indigo-50 to-white rounded-xl p-4 border border-indigo-100">
-            <h5 className="font-semibold text-indigo-800">🌐 Website Hero (landing)</h5>
-            <div className="mt-2">
-              <p className="font-semibold text-gray-900">{data.landing_copy.headline}</p>
-              <p className="text-gray-700 mt-1">{data.landing_copy.subheadline}</p>
-              <p className="mt-3 text-blue-600 font-medium">{data.landing_copy.call_to_action}</p>
+          <motion.div
+            className="bg-gradient-to-r from-blue-50 to-cyan-50 rounded-2xl p-6 border border-blue-100 shadow-lg"
+            whileHover={{ scale: 1.01 }}
+          >
+            <h3 className="text-xl font-bold text-blue-800 mb-4 flex items-center">
+              <span className="mr-2">🌐</span>
+              Website Landing Copy
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <p className="text-sm font-semibold text-blue-700 mb-1">Headline</p>
+                <p className="text-lg font-bold text-gray-800">{data.landing_copy.headline}</p>
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-blue-700 mb-1">Subheadline</p>
+                <p className="text-gray-700">{data.landing_copy.subheadline}</p>
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-blue-700 mb-1">Call to Action</p>
+                <p className="text-green-600 font-semibold">{data.landing_copy.call_to_action}</p>
+              </div>
             </div>
-          </div>
+          </motion.div>
         )}
 
-        {/* Colors */}
-        {data.colors && (
-          <div className="mt-4">
-            <h5 className="font-semibold text-gray-800">🎨 Colors</h5>
-            <div className="flex gap-3 mt-2">
-              {Object.entries(data.colors).map(([key, val]) => (
-                <div key={key} className="text-center">
+        {/* Branding Section */}
+        <div className="grid md:grid-cols-2 gap-6">
+          {/* Color Palette */}
+          <motion.div 
+            className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-gray-100 shadow-lg"
+            whileHover={{ y: -5 }}
+          >
+            <h3 className="text-xl font-bold text-gray-800 mb-6 flex items-center">
+              <span className="mr-2">🎨</span>
+              Brand Colors
+            </h3>
+            <div className="grid grid-cols-2 gap-4">
+              {data.colors && Object.entries(data.colors).map(([name, color]) => (
+                <motion.div key={name} whileHover={{ scale: 1.1 }} className="text-center">
                   <div
-                    className="w-12 h-12 rounded-xl border shadow-sm"
-                    style={{ backgroundColor: val }}
-                    title={`${key}: ${val}`}
+                    className="w-16 h-16 rounded-2xl shadow-lg border-2 border-white mx-auto mb-2"
+                    style={{ backgroundColor: color }}
                   />
-                  <p className="text-xs text-gray-600 mt-1 capitalize">{key}</p>
-                </div>
+                  <p className="text-sm font-medium text-gray-700 capitalize">{name}</p>
+                  <p className="text-xs text-gray-500 font-mono">{color}</p>
+                </motion.div>
               ))}
             </div>
-          </div>
-        )}
+          </motion.div>
 
-        {/* Logo ideas */}
-        {Array.isArray(data.logo_ideas) && data.logo_ideas.length > 0 && (
-          <div className="mt-4">
-            <h5 className="font-semibold text-gray-800">🚀 Logo ideas</h5>
-            <ul className="list-disc ml-6 mt-2 text-gray-700">
-              {data.logo_ideas.map((l, i) => (
-                <li key={i}>{l}</li>
+          {/* Logo Ideas */}
+          <motion.div 
+            className="bg-white/70 backdrop-blur-sm rounded-2xl p-6 border border-gray-100 shadow-lg"
+            whileHover={{ y: -5 }}
+          >
+            <h3 className="text-xl font-bold text-gray-800 mb-6 flex items-center">
+              <span className="mr-2">🚀</span>
+              Logo Concepts
+            </h3>
+            <ul className="space-y-3">
+              {data.logo_ideas?.map((idea, i) => (
+                <motion.li
+                  key={i}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: i * 0.1 }}
+                  className="flex items-center space-x-3 bg-gradient-to-r from-gray-50 to-white p-3 rounded-xl border border-gray-200"
+                >
+                  <span className="text-yellow-500">✦</span>
+                  <span className="text-gray-700">{idea}</span>
+                </motion.li>
               ))}
             </ul>
-          </div>
-        )}
+          </motion.div>
+        </div>
       </div>
     )
   }
 
-  // ✅ RENDER WEBSITE CODE
-  function RenderWebsiteCode({ code }) {
+  // ✅ RENDER WEBSITE CODE COMPONENT
+  const RenderWebsiteCode = ({ code }) => {
     if (!code) return null
 
     return (
-      <div className="bg-white rounded-2xl shadow-lg border border-gray-200">
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
-          <h3 className="font-semibold text-gray-900">🌐 Generated Landing Page Code</h3>
-          <button
-            onClick={() => {
-              navigator.clipboard.writeText(code)
-              const el = document.createElement("div")
-              el.className = "fixed top-4 right-4 bg-green-600 text-white px-4 py-2 rounded-lg z-50"
-              el.innerText = "✅ Code Copied!"
-              document.body.appendChild(el)
-              setTimeout(() => el.remove(), 2000)
-            }}
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"
-          >
-            Copy Code
-          </button>
+      <div className="bg-white rounded-3xl shadow-2xl border border-gray-200 overflow-hidden">
+        <div className="flex items-center justify-between p-6 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white">
+          <div className="flex items-center space-x-3">
+            <div className="w-3 h-3 bg-red-400 rounded-full"></div>
+            <div className="w-3 h-3 bg-yellow-400 rounded-full"></div>
+            <div className="w-3 h-3 bg-green-400 rounded-full"></div>
+            <h3 className="font-bold text-gray-800 text-lg">Generated Landing Page Code</h3>
+          </div>
+          <div className="flex items-center space-x-3">
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={openPreview}
+              className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-6 py-3 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all flex items-center space-x-2"
+            >
+              <span>👁️</span>
+              <span>Preview Website</span>
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => {
+                navigator.clipboard.writeText(code)
+                showNotification("✅ Code copied to clipboard!", "success")
+              }}
+              className="bg-gradient-to-r from-blue-500 to-purple-500 text-white px-6 py-3 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all"
+            >
+              Copy Code
+            </motion.button>
+          </div>
         </div>
-        <div className="p-4 bg-gray-900 rounded-b-2xl">
-          <pre className="text-green-400 text-sm overflow-auto max-h-96 whitespace-pre-wrap">
+        <div className="p-6 bg-gray-900 max-h-96 overflow-auto">
+          <pre className="text-green-400 text-sm whitespace-pre-wrap font-mono">
             {code}
           </pre>
         </div>
-        <div className="p-4 bg-gray-50 border-t border-gray-200">
-          <p className="text-sm text-gray-600">
-            💡 <strong>How to use:</strong> Copy this code and save as <code>index.html</code>. 
-            Open in browser or deploy to Netlify/Vercel.
+        <div className="p-4 bg-gradient-to-r from-blue-50 to-purple-50 border-t border-gray-200">
+          <p className="text-sm text-gray-600 text-center">
+            💡 <strong>Pro Tip:</strong> Click "Preview Website" to see your landing page in action, or copy the code to deploy instantly!
           </p>
         </div>
       </div>
@@ -480,92 +546,212 @@ Generate the complete landing page code now:
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-8">
-      {/* Header */}
-      <div className="text-center mb-12">
-        <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl shadow-lg mb-6">
-          <span className="text-2xl text-white">🚀</span>
-        </div>
-        <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600 mb-4">
-          PitchCraft AI
-        </h1>
-        <p className="text-xl text-gray-600 max-w-2xl mx-auto">
-          Describe your startup idea and get a complete pitch deck + professional landing page code instantly.
-        </p>
-      </div>
-
-      {/* Form */}
-      <div className="bg-white/80 backdrop-blur-xl rounded-3xl shadow-2xl border border-white/40 p-8 mb-8">
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-3">
-              Describe Your Startup Idea
-            </label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="e.g. I want to build an AI-powered fitness app that creates personalized workout plans based on user goals, with video guidance and progress tracking for busy professionals..."
-              className="w-full h-48 rounded-2xl p-6 text-gray-800 border-2 border-gray-200 focus:border-blue-500 focus:ring-4 focus:ring-blue-200 outline-none resize-none shadow-sm transition-all duration-200 bg-white/50 backdrop-blur-sm"
-              required
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={loading}
-            className={`w-full py-4 rounded-2xl font-bold text-white shadow-lg transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98] ${
-              loading
-                ? "bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed"
-                : "bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 shadow-blue-500/25"
-            }`}
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 py-8">
+      {/* Preview Modal */}
+      <AnimatePresence>
+        {showPreview && landingCode && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={closePreview}
           >
-            {loading ? (
-              <div className="flex items-center justify-center space-x-3">
-                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                <span>Generating Pitch + Website Code...</span>
+            <motion.div
+              initial={{ scale: 0.8, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-6 border-b border-gray-200 bg-gradient-to-r from-gray-50 to-white rounded-t-3xl">
+                <div className="flex items-center space-x-3">
+                  <div className="w-3 h-3 bg-red-400 rounded-full cursor-pointer" onClick={closePreview}></div>
+                  <div className="w-3 h-3 bg-yellow-400 rounded-full"></div>
+                  <div className="w-3 h-3 bg-green-400 rounded-full"></div>
+                  <h3 className="font-bold text-gray-800 text-lg">Website Preview - {result?.name}</h3>
+                </div>
+                <div className="flex items-center space-x-3">
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => {
+                      navigator.clipboard.writeText(landingCode)
+                      showNotification("✅ Code copied to clipboard!", "success")
+                    }}
+                    className="bg-blue-500 text-white px-4 py-2 rounded-lg font-semibold text-sm"
+                  >
+                    Copy Code
+                  </motion.button>
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={closePreview}
+                    className="bg-gray-500 text-white px-4 py-2 rounded-lg font-semibold text-sm"
+                  >
+                    Close
+                  </motion.button>
+                </div>
               </div>
-            ) : (
-              <div className="flex items-center justify-center space-x-2">
-                <span>✨</span>
-                <span>Generate Complete Startup Package</span>
+
+              {/* Preview Content */}
+              <div className="flex-1 bg-gray-100 rounded-b-3xl overflow-hidden">
+                <iframe
+                  src={previewUrl}
+                  className="w-full h-full border-0"
+                  title="Website Preview"
+                  sandbox="allow-scripts allow-same-origin"
+                />
               </div>
-            )}
-          </button>
-        </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="max-w-6xl mx-auto px-4 relative z-10">
+        {/* Header */}
+        <motion.div 
+          initial={{ opacity: 0, y: -50 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center mb-16"
+        >
+          <motion.div
+            whileHover={{ scale: 1.1, rotate: 5 }}
+            className="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 rounded-3xl shadow-2xl mb-8"
+          >
+            <span className="text-3xl text-white">🚀</span>
+          </motion.div>
+          <h1 className="text-6xl font-black bg-clip-text text-transparent bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 mb-6">
+            PitchCraft AI
+          </h1>
+          <p className="text-xl text-gray-600 max-w-2xl mx-auto leading-relaxed">
+            Transform your startup idea into a complete business package with AI-powered pitch generation and professional website code.
+          </p>
+        </motion.div>
+
+        {/* Form */}
+        <motion.div
+          initial={{ opacity: 0, y: 30 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className="bg-white/70 backdrop-blur-xl rounded-3xl shadow-2xl border border-white/40 p-8 mb-12"
+        >
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-4 flex items-center">
+                <span className="bg-gradient-to-r from-blue-500 to-purple-500 text-white px-3 py-1 rounded-full text-xs mr-2">STEP 1</span>
+                Describe Your Startup Vision
+              </label>
+              <motion.textarea
+                whileFocus={{ scale: 1.005 }}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="💡 Example: I want to build an AI-powered fitness app that creates personalized workout plans with real-time form correction using computer vision, targeting busy professionals who want effective home workouts..."
+                className="w-full min-h-[200px] p-6 rounded-2xl border-2 border-gray-200 focus:border-blue-400 focus:ring-4 focus:ring-blue-100 outline-none resize-none shadow-inner bg-white/50 backdrop-blur-sm text-gray-700 placeholder-gray-400 transition-all duration-300"
+                required
+              />
+            </div>
+
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              disabled={loading}
+              className={`w-full py-5 rounded-2xl font-bold text-white shadow-2xl transition-all duration-300 relative overflow-hidden ${
+                loading
+                  ? "bg-gradient-to-r from-gray-400 to-gray-500 cursor-not-allowed"
+                  : "bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 hover:from-blue-600 hover:via-purple-600 hover:to-pink-600 hover:shadow-blue-500/25"
+              }`}
+            >
+              {loading ? (
+                <div className="flex items-center justify-center space-x-3">
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                    className="w-6 h-6 border-2 border-white border-t-transparent rounded-full"
+                  />
+                  <span>AI is crafting your startup...</span>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center space-x-3">
+                  <motion.span
+                    animate={{ scale: [1, 1.2, 1] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  >
+                    ✨
+                  </motion.span>
+                  <span>Generate Complete Startup Package</span>
+                </div>
+              )}
+            </motion.button>
+          </form>
+        </motion.div>
+
+        {/* Results Section */}
+        <AnimatePresence>
+          {result && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className="mb-12"
+            >
+              {/* Enhanced Tabs */}
+              <motion.div 
+                className="flex space-x-2 mb-8 bg-white/50 backdrop-blur-sm rounded-2xl p-2 w-fit mx-auto border border-white/30 shadow-lg"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.5 }}
+              >
+                {[
+                  { id: "pitch", label: "📊 Pitch Details", icon: "💼" },
+                  { id: "website", label: "🌐 Website Code", icon: "🚀" }
+                ].map((tab) => (
+                  <motion.button
+                    key={tab.id}
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`px-8 py-4 rounded-xl font-semibold transition-all duration-300 flex items-center space-x-2 ${
+                      activeTab === tab.id
+                        ? "bg-white text-blue-600 shadow-lg"
+                        : "text-gray-600 hover:text-gray-900 hover:bg-white/50"
+                    }`}
+                  >
+                    <span>{tab.icon}</span>
+                    <span>{tab.label}</span>
+                  </motion.button>
+                ))}
+              </motion.div>
+
+              {/* Tab Content */}
+              <AnimatePresence mode="wait">
+                {activeTab === "pitch" && (
+                  <motion.div
+                    key="pitch"
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                  >
+                    <RenderPitchDetails data={result} />
+                  </motion.div>
+                )}
+
+                {activeTab === "website" && landingCode && (
+                  <motion.div
+                    key="website"
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -20 }}
+                  >
+                    <RenderWebsiteCode code={landingCode} />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-
-      {/* Results Tabs */}
-      {result && (
-        <div className="mb-8">
-          {/* Tabs */}
-          <div className="flex space-x-1 mb-6 bg-gray-100 p-1 rounded-2xl w-fit mx-auto">
-            <button
-              onClick={() => setActiveTab("pitch")}
-              className={`px-6 py-3 rounded-xl font-semibold transition-all ${
-                activeTab === "pitch"
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-gray-600 hover:text-gray-900"
-              }`}
-            >
-              📊 Pitch Details
-            </button>
-            <button
-              onClick={() => setActiveTab("website")}
-              className={`px-6 py-3 rounded-xl font-semibold transition-all ${
-                activeTab === "website"
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-gray-600 hover:text-gray-900"
-              }`}
-            >
-              🌐 Website Code
-            </button>
-          </div>
-
-          {/* Tab Content */}
-          {activeTab === "pitch" && <RenderPitchDetails data={result} />}
-          {activeTab === "website" && <RenderWebsiteCode code={landingCode} />}
-        </div>
-      )}
     </div>
   )
 }
