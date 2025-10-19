@@ -8,9 +8,8 @@ export default defineConfig({
    build: {
     outDir: 'dist'
   },
-  // Add this for proper routing
   base: './',
-  // Optional: For better SPA support
+  // For SPA routing
   server: {
     historyApiFallback: true
   }
